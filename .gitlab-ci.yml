@@ -1,0 +1,156 @@
+stages:
+  - build_baseimage
+  - lint
+  - build_appimage
+  - deploy
+
+variables:
+  GIT_STRATEGY: fetch
+  CI_REGISTRY_IMAGE_COMMIT: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+  CI_REGISTRY_IMAGE_LATEST: $CI_REGISTRY_IMAGE:latest
+  DEPLOY_IMAGE_TAG: $CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA
+  CI_REGISTRY_IMAGE_BRANCH: $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG
+  CI_REGISTRY_IMAGE_BASE: $CI_REGISTRY_IMAGE:baseimage
+  APP_NAME: $CI_PROJECT_NAME
+  
+
+
+
+.build:
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  before_script:
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"auth\":\"$(echo -n ${CI_REGISTRY_USER}:${CI_REGISTRY_PASSWORD} | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - wget https://github.com/a8m/envsubst/releases/download/v1.4.2/envsubst-Linux-x86_64 -O /bin/envsubst && chmod a+x /bin/envsubst
+    - /bin/envsubst "$(printf '${%s} ' $(env | cut -d'=' -f1))" < Dockerfile.gotmpl > Dockerfile
+  script:
+    - /kaniko/executor --context $CI_PROJECT_DIR
+      --dockerfile $DOCKERFILE
+      --destination $DESTINATION
+      --image-fs-extract-retry=6
+      --push-retry=6
+
+build baseimage:
+  stage: build_baseimage
+  extends: [.build]
+  only:
+    changes:
+      - pyproject.toml
+      - poetry.lock
+      - Dockerfile-baseimage
+  except:
+    refs:
+      - tags
+    variables:
+      - $CI_COMMIT_MESSAGE =~ /skip.build/i
+  variables:
+    DOCKERFILE: $CI_PROJECT_DIR/Dockerfile-baseimage
+    DESTINATION: $CI_REGISTRY_IMAGE:baseimage
+
+re-build baseimage manual:
+  stage: build_baseimage
+  extends: [.build]
+  except:
+    refs:
+      - tags
+    variables:
+      - $CI_COMMIT_MESSAGE =~ /skip.build/i
+  variables:
+    DOCKERFILE: $CI_PROJECT_DIR/Dockerfile-baseimage
+    DESTINATION: $CI_REGISTRY_IMAGE:baseimage
+  when: manual
+
+
+
+lint-on-commit:
+  stage: lint
+  image: $CI_REGISTRY_IMAGE_BASE
+  script:
+    - pip install poetry
+    - poetry install --no-root
+    - poetry run isort ./app
+    - poetry run black ./app
+    - poetry run flake8 ./app
+
+
+
+build appimage:
+  stage: build_appimage
+  extends: [.build]
+  except:
+    refs:
+      - tags
+    variables:
+      - $CI_COMMIT_MESSAGE =~ /skip.build/i
+  variables:
+    DOCKERFILE: $CI_PROJECT_DIR/Dockerfile
+    DESTINATION: $CI_REGISTRY_IMAGE_COMMIT
+
+
+
+
+.deploy:
+  variables:
+     KUBE_NAMESPACE: $KUBE_NAMESPACE_PREFIX-$CI_ENVIRONMENT_SLUG
+  stage: deploy
+  image: dtzar/helm-kubectl:3
+  before_script:
+    - kubectl config get-contexts
+    - if [ -n "$KUBE_CONTEXT" ]; then kubectl config use-context "$KUBE_CONTEXT"; fi
+    - if [ -n "$KUBE_NAMESPACE" ]; then kubectl config set-context --current --namespace=$KUBE_NAMESPACE; fi
+    - if [[ $CI_COMMIT_MESSAGE == *"skip.build/"* ]]; then export DEPLOY_IMAGE_TAG=latest && echo skip.build is set Using latest tag ; fi
+    - kubectl create namespace $KUBE_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+    - kubectl create secret docker-registry $CI_PROJECT_NAME-registry
+      --docker-username=$CI_DEPLOY_USER
+      --docker-password=$CI_DEPLOY_PASSWORD
+      --docker-server=registry.gitlab.com -o yaml --dry-run=client --namespace=$KUBE_NAMESPACE | kubectl apply -f -
+    - kubectl create configmap env --from-env-file=$ENV --output yaml --dry-run=client --namespace=$KUBE_NAMESPACE > env.yaml
+    - echo "populate environment variables fron ENV and SECRETS file" 
+    - export $(grep -v '^#' $SECRETS | xargs) 
+    - export $(grep -v '^#' $ENV | xargs) 
+    - export INGRESS_HOST=$(echo $CI_ENVIRONMENT_URL |  awk -F/ '{print $3}') && echo  INGRESS_HOST is $INGRESS_HOST
+    - if [[ $DEBUG == "1" ]]; then printenv ; fi
+    - envsubst "$(printf '${%s} ' $(env | cut -d'=' -f1))" < deploy/values.yaml.gotmpl > deploy/values.yaml
+    - envsubst "$(printf '${%s} ' $(env | cut -d'=' -f1))" < deploy/Chart.yaml.gotmpl > deploy/Chart.yaml
+    - if [[ $DEBUG == "1" ]]; then cat deploy/values.yaml ; fi
+  script:
+    - helm upgrade --install
+      --set-file envmap=env.yaml
+      --cleanup-on-fail
+      --namespace=$KUBE_NAMESPACE
+      $CI_PROJECT_NAME-$CI_ENVIRONMENT_SLUG deploy/
+
+
+deploy test:
+  extends: [ .deploy ]
+  only:
+    refs:
+      - dev
+      - develop
+  except:
+    refs:
+      - tags
+    variables:
+      - $CI_COMMIT_MESSAGE =~ /skip.deploy/i
+  environment:
+    name: test
+
+
+
+deploy prod:
+  extends: [ .deploy ]
+  only:
+    refs:
+      - main
+      - master
+  except:
+    refs:
+      - tags
+    variables:
+      - $CI_COMMIT_MESSAGE =~ /skip.deploy/i
+  environment:
+    name: prod
+  when: manual
+
+

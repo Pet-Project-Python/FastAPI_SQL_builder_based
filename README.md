@@ -1,4 +1,4 @@
-Financial Adviser Offers Service
+FastAPI Service
 ----------
 
 Stack in project
@@ -25,7 +25,7 @@ Quickstart
 
 First, run the following commands to bootstrap your environment with ``poetry``:
 
-    git clone https://gitlab.com/ru.profinansy/finadviser/financial-adviser-offers-service.git
+    git clone https://github.com/Pet-Project-Python/FastAPI_SQL_builder_based.git
     cd your-project
     poetry shell
     poetry install
@@ -53,12 +53,12 @@ To run the web application in docker use:
 
     docker-compose up -d --build
     docker-compose exec db psql --username=user --dbname=db_name
-    docker-compose exec microservice poetry run alembic init -t async migrations
-    docker-compose logs microservice
-    docker-compose exec microservice alembic revision --autogenerate -m "init"
-    docker-compose exec microservice alembic upgrade head
+    docker-compose exec app poetry run alembic init -t async migrations
+    docker-compose logs app
+    docker-compose exec app alembic revision --autogenerate -m "init"
+    docker-compose exec app alembic upgrade head
 
-Application will be available on ``localhost:8021`` in your browser.
+Application will be available on ``localhost:8020`` in your browser.
 
 Run tests
 ---------
